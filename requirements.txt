@@ -2,4 +2,5 @@ streamlit
 pandas
 numpy
 numpy-financial
-google-genai # 
+google-genai
+tabulate  # <--- THƯ VIỆN CẦN THIẾT ĐỂ ĐỊNH DẠNG BẢNG CHO AI
