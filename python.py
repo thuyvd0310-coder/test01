@@ -24,30 +24,41 @@ if 'extracted_data' not in st.session_state:
 
 def calculate_npv(rate, cash_flows):
     """Tính Giá trị Hiện tại Thuần (NPV)"""
+    # np.npv yêu cầu rate > 0
+    if rate <= 0:
+        return 0
     return np.npv(rate, cash_flows)
 
 def calculate_irr(cash_flows):
     """Tính Tỷ suất Hoàn vốn Nội bộ (IRR)"""
-    # np.irr yêu cầu cash_flows phải là list/array
     try:
+        # IRR yêu cầu ít nhất một dòng tiền âm và một dòng tiền dương
+        if all(cf >= 0 for cf in cash_flows[1:]) or cash_flows[0] >= 0:
+             return np.nan
         return np.irr(cash_flows)
     except:
         return np.nan
 
 def calculate_payback_period(cash_flows, discounted=False, rate=None):
     """Tính Thời gian Hoàn vốn (PP) hoặc Thời gian Hoàn vốn có Chiết khấu (DPP)"""
-    if discounted and rate is None:
-        return None # Cần WACC cho DPP
+    if discounted and (rate is None or rate <= 0):
+        # Không thể tính DPP nếu không có WACC hoặc WACC không hợp lệ
+        return None 
 
     cumulative_cf = 0
     periods = 0
-    initial_investment = cash_flows[0] # Khoản đầu tư ban đầu (âm)
+    # Khoản đầu tư ban đầu (luôn là giá trị âm trong cash_flows[0])
+    initial_investment = cash_flows[0] 
     
     # Bỏ qua CF ban đầu để tính luỹ kế
     cf_data = cash_flows[1:]
     
+    # Kiểm tra điều kiện hoàn vốn: nếu tổng dòng tiền dương không bù đắp được vốn ban đầu
+    if sum(cf_data) < abs(initial_investment):
+        return periods + 1
+        
     # Nếu tính DPP, chiết khấu dòng tiền
-    if discounted and rate is not None:
+    if discounted and rate is not None and rate > 0:
         discounted_cf = []
         for t, cf in enumerate(cf_data, 1):
             discounted_cf.append(cf / ((1 + rate) ** t))
@@ -58,6 +69,10 @@ def calculate_payback_period(cash_flows, discounted=False, rate=None):
         periods += 1
         cumulative_cf += cf
         
+        # Nếu dòng tiền hiện tại là âm, bỏ qua
+        if cf <= 0:
+            continue
+        
         # Kiểm tra xem luỹ kế đã vượt qua vốn đầu tư ban đầu chưa
         if cumulative_cf >= abs(initial_investment):
             # Tính toán phần thập phân (nếu có)
@@ -66,7 +81,7 @@ def calculate_payback_period(cash_flows, discounted=False, rate=None):
             fraction = remaining / cf if cf != 0 else 1
             return periods - 1 + fraction
     
-    # Nếu không bao giờ hoàn vốn
+    # Nếu không bao giờ hoàn vốn (trường hợp hiếm nếu đã kiểm tra tổng CF)
     return periods + 1
 
 # --- Hàm gọi API Gemini cho Trích xuất Dữ liệu (Task 1) ---
@@ -91,6 +106,7 @@ def extract_project_params(doc_text, api_key):
             "required": ["Vốn đầu tư ban đầu (triệu VND)", "Dòng đời dự án (năm)", "Doanh thu hàng năm (triệu VND)", "Chi phí hoạt động hàng năm (triệu VND)", "WACC (%)", "Thuế suất (%)"]
         }
         
+        # Định nghĩa system instruction
         system_prompt = """
         Bạn là một chuyên gia tài chính, nhiệm vụ của bạn là trích xuất 6 thông số tài chính chính xác sau đây từ văn bản đề xuất kinh doanh được cung cấp: Vốn đầu tư ban đầu, Dòng đời dự án (số năm), Doanh thu hàng năm, Chi phí hoạt động hàng năm, WACC, và Thuế suất. 
         Đầu ra của bạn PHẢI là một đối tượng JSON tuân thủ schema đã định nghĩa.
@@ -98,14 +114,18 @@ def extract_project_params(doc_text, api_key):
         """
         user_query = f"Trích xuất các thông số tài chính từ văn bản đề xuất kinh doanh sau:\n\n---\n\n{doc_text}"
 
+        # Sửa lỗi: Cấu hình yêu cầu system instruction và response schema
+        # Đặt system_instruction trong config để tránh lỗi "unexpected keyword argument" 
+        config = {
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+            "system_instruction": system_prompt
+        }
+
         response = client.models.generate_content(
             model=model_name,
             contents=user_query,
-            system_instruction=system_prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": response_schema,
-            }
+            config=config # Truyền tất cả cấu hình qua tham số config
         )
         
         # Phân tích chuỗi JSON nhận được
@@ -117,7 +137,8 @@ def extract_project_params(doc_text, api_key):
         return None
     except json.JSONDecodeError:
         st.error("Lỗi phân tích JSON từ AI. Vui lòng thử lại hoặc điều chỉnh đề xuất Word file.")
-        st.info(f"Phản hồi thô của AI: {response.text}")
+        if 'response' in locals():
+            st.info(f"Phản hồi thô của AI: {response.text}")
         return None
     except Exception as e:
         st.error(f"Đã xảy ra lỗi không xác định trong quá trình trích xuất: {e}")
@@ -169,10 +190,11 @@ uploaded_file = st.file_uploader(
 with st.sidebar:
     st.header("Cấu hình API Key")
     # Sử dụng st.secrets nếu triển khai trên Streamlit Cloud
-    st.info("Ứng dụng này cần 'GEMINI_API_KEY' trong Streamlit Secrets để hoạt động.")
-    api_key = st.secrets.get("GEMINI_API_KEY")
+    st.info("Ứng dụng này cần **'GEMINI_API_KEY'** trong Streamlit Secrets để hoạt động.")
+    # Canvas tự động cung cấp API key qua st.secrets.get()
+    api_key = st.secrets.get("GEMINI_API_KEY") 
     if not api_key:
-        st.warning("Vui lòng cấu hình Khóa API trong Secrets hoặc chạy cục bộ.")
+        st.warning("Không tìm thấy Khóa API. Vui lòng kiểm tra cấu hình Secrets.")
 
 
 if uploaded_file is not None:
@@ -180,21 +202,23 @@ if uploaded_file is not None:
     
     if st.button("2. Lọc Dữ Liệu Tài Chính Bằng AI (Task 1) 🤖", type="primary"):
         if not api_key:
-            st.error("Không tìm thấy GEMINI_API_KEY. Vui lòng kiểm tra cấu hình.")
+            st.error("Lỗi: Không tìm thấy GEMINI_API_KEY. Vui lòng kiểm tra cấu hình.")
         else:
             with st.spinner('Đang đọc file và gửi yêu cầu trích xuất dữ liệu đến AI...'):
                 
                 # Đọc nội dung file Word
-                doc_file = BytesIO(uploaded_file.read())
-                document = Document(doc_file)
-                full_text = []
-                for paragraph in document.paragraphs:
-                    full_text.append(paragraph.text)
-                doc_text = "\n".join(full_text)
-                
-                # Gọi hàm trích xuất
-                extracted_data = extract_project_params(doc_text, api_key)
-                st.session_state.extracted_data = extracted_data
+                try:
+                    doc_file = BytesIO(uploaded_file.read())
+                    document = Document(doc_file)
+                    full_text = [paragraph.text for paragraph in document.paragraphs]
+                    doc_text = "\n".join(full_text)
+                    
+                    # Gọi hàm trích xuất
+                    extracted_data = extract_project_params(doc_text, api_key)
+                    st.session_state.extracted_data = extracted_data
+
+                except Exception as e:
+                    st.error(f"Lỗi khi đọc file Word. Hãy chắc chắn file là định dạng .docx hợp lệ. Chi tiết: {e}")
     
     # Hiển thị dữ liệu đã lọc và thực hiện tính toán nếu có dữ liệu
     if st.session_state.extracted_data:
@@ -206,24 +230,27 @@ if uploaded_file is not None:
         col_params_1, col_params_2, col_params_3 = st.columns(3)
         
         # Hiển thị các thông số quan trọng
+        V_dau_tu = data.get('Vốn đầu tư ban đầu (triệu VND)', 0)
+        WACC_percent = data.get('WACC (%)', 0)
+        N_nam = data.get('Dòng đời dự án (năm)', 0)
+        Thue_suat_percent = data.get('Thuế suất (%)', 0)
+        Doanh_thu = data.get('Doanh thu hàng năm (triệu VND)', 0)
+        Chi_phi = data.get('Chi phí hoạt động hàng năm (triệu VND)', 0)
+
         with col_params_1:
-            st.metric("Vốn đầu tư ban đầu (triệu VND)", f"{data.get('Vốn đầu tư ban đầu (triệu VND)', 0):,.0f}")
-            st.metric("WACC (%)", f"{data.get('WACC (%)', 0):.2f}%")
+            st.metric("Vốn đầu tư ban đầu (triệu VND)", f"{V_dau_tu:,.0f}")
+            st.metric("WACC (%)", f"{WACC_percent:.2f}%")
         with col_params_2:
-            st.metric("Dòng đời dự án (năm)", f"{data.get('Dòng đời dự án (năm)', 0)}")
-            st.metric("Thuế suất TNDN (%)", f"{data.get('Thuế suất (%)', 0):.2f}%")
+            st.metric("Dòng đời dự án (năm)", f"{N_nam}")
+            st.metric("Thuế suất TNDN (%)", f"{Thue_suat_percent:.2f}%")
         with col_params_3:
-            st.metric("Doanh thu hàng năm (triệu VND)", f"{data.get('Doanh thu hàng năm (triệu VND)', 0):,.0f}")
-            st.metric("Chi phí HĐ hàng năm (triệu VND)", f"{data.get('Chi phí hoạt động hàng năm (triệu VND)', 0):,.0f}")
+            st.metric("Doanh thu hàng năm (triệu VND)", f"{Doanh_thu:,.0f}")
+            st.metric("Chi phí HĐ hàng năm (triệu VND)", f"{Chi_phi:,.0f}")
 
         # --- Chuẩn bị và Tính toán Dòng tiền (Tasks 2 & 3) ---
         
-        V_dau_tu = data.get('Vốn đầu tư ban đầu (triệu VND)', 0)
-        N_nam = data.get('Dòng đời dự án (năm)', 0)
-        Doanh_thu = data.get('Doanh thu hàng năm (triệu VND)', 0)
-        Chi_phi = data.get('Chi phí hoạt động hàng năm (triệu VND)', 0)
-        WACC = data.get('WACC (%)', 0) / 100 # Chuyển % sang thập phân
-        Thue_suat = data.get('Thuế suất (%)', 0) / 100 # Chuyển % sang thập phân
+        WACC = WACC_percent / 100 # Chuyển % sang thập phân
+        Thue_suat = Thue_suat_percent / 100 # Chuyển % sang thập phân
 
         if N_nam > 0 and WACC > 0 and V_dau_tu > 0:
             
@@ -257,38 +284,36 @@ if uploaded_file is not None:
             
             col_metrics_1, col_metrics_2, col_metrics_3, col_metrics_4 = st.columns(4)
             
-            metrics_display = {
-                "NPV (Giá trị Hiện tại Thuần)": f"{npv:,.0f} Triệu VND",
-                "IRR (Tỷ suất Hoàn vốn Nội bộ)": f"{irr*100:.2f}%" if not math.isnan(irr) else "Không tính được",
-                "PP (Thời gian Hoàn vốn)": f"{pp:.2f} năm",
-                "DPP (Thời gian Hoàn vốn có Chiết khấu)": f"{dpp:.2f} năm"
+            # Xử lý hiển thị cho các chỉ số
+            irr_display = f"{irr*100:.2f}%" if not math.isnan(irr) else "Không tính được"
+            npv_display = f"{npv:,.0f} Triệu VND"
+            pp_display = f"{pp:.2f} năm" if pp is not None else "N/A"
+            dpp_display = f"{dpp:.2f} năm" if dpp is not None else "N/A (Thiếu WACC)"
+
+            metrics_for_ai = {
+                "NPV (Triệu VND)": f"{npv:,.2f}",
+                "IRR": irr_display,
+                "WACC": f"{WACC*100:.2f}%",
+                "PP (năm)": pp_display,
+                "DPP (năm)": dpp_display,
+                "Dòng đời dự án (năm)": N_nam
             }
             
             with col_metrics_1:
-                st.metric("NPV", metrics_display["NPV (Giá trị Hiện tại Thuần)"], 
+                st.metric("NPV", npv_display, 
                           delta="Dự án tạo thêm giá trị" if npv > 0 else "Dự án làm giảm giá trị")
             with col_metrics_2:
-                st.metric("IRR", metrics_display["IRR (Tỷ suất Hoàn vốn Nội bộ)"], 
+                st.metric("IRR", irr_display, 
                           delta=f"Cao hơn WACC ({WACC*100:.2f}%)" if (not math.isnan(irr) and irr > WACC) else None)
             with col_metrics_3:
-                st.metric("PP", metrics_display["PP (Thời gian Hoàn vốn)"])
+                st.metric("PP", pp_display)
             with col_metrics_4:
-                st.metric("DPP", metrics_display["DPP (Thời gian Hoàn vốn có Chiết khấu)"])
+                st.metric("DPP", dpp_display)
 
             # --- Yêu cầu AI Phân tích (Task 4) ---
             st.markdown("---")
             st.subheader("6. Phân Tích Hiệu Quả Dự Án Bằng AI (Task 4)")
             
-            # Chuẩn bị dữ liệu cho AI
-            metrics_for_ai = {
-                "NPV (Triệu VND)": f"{npv:,.2f}",
-                "IRR": f"{irr*100:.2f}%" if not math.isnan(irr) else "Không xác định",
-                "WACC": f"{WACC*100:.2f}%",
-                "PP (năm)": f"{pp:.2f}",
-                "DPP (năm)": f"{dpp:.2f}",
-                "Dòng đời dự án (năm)": N_nam
-            }
-
             if st.button("Yêu cầu AI Phân tích Hiệu quả Dự án 🧠", key="analyze_button"):
                 if api_key:
                     with st.spinner('Đang gửi các chỉ số và chờ Gemini phân tích...'):
@@ -307,4 +332,13 @@ elif st.session_state.extracted_data:
     st.info("Vui lòng tải lên file Word để bắt đầu phân tích.")
 
 else:
-    st.info("Vui lòng tải lên file Word (.docx) chứa đề xuất kinh doanh và nhấn nút 'Lọc Dữ Liệu' để bắt đầu.")
+    # Hướng dẫn cần thiết khi triển khai
+    st.info("🚨 HƯỚNG DẪN:")
+    st.warning("Ứng dụng cần Khóa API được cấu hình và file **requirements.txt** phải chứa các thư viện sau để hoạt động:")
+    st.code("""
+streamlit
+pandas
+numpy
+python-docx>=1.0.0
+google-genai>=0.14.0
+""", language="text")
