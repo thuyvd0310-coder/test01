@@ -1,5 +1,4 @@
 streamlit
 pandas
 numpy
-python-docx>=1.0.0
-google-genai>=0.14.0
+numpy-financial
